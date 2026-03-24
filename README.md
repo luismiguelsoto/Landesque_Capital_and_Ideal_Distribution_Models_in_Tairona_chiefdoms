@@ -1,0 +1,1 @@
+# Landesque_Capital_and_Ideal_Distribution_Models_in_Tairona_chiefdoms
