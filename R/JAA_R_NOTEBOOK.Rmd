@@ -1,0 +1,1703 @@
+---
+title: "Landesque Capital and Ideal Distribution Models: Mapping Agricultural Suitability in the Sierra Nevada de Santa Marta, Colombia — SENSITIVITY TEST (GLM vs GAM vs Random Forest)"
+author: "Luis Miguel Soto Rodríguez"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    code_folding: show
+    fig_width: 10
+    fig_height: 8
+  word_document:
+    toc: true
+    toc_depth: '3'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center", dpi = 300)
+```
+
+# 1. Configuration
+
+```{r packages}
+rm(list = ls()); gc()
+
+required_packages <- c(
+  "sf","terra","dplyr","ggplot2","pROC","broom","patchwork","spdep",
+  "gstat","blockCV","viridis","scales","tidyr","gridExtra","forcats",
+  "RColorBrewer","car","mgcv","boot","knitr","classInt","ggspatial",
+  "ggpubr","rstatix","httr","jsonlite","ranger"
+)
+
+new_packages <- required_packages[!(required_packages %in% installed.packages()[,"Package"])]
+if (length(new_packages) > 0) install.packages(new_packages, dependencies = TRUE)
+suppressPackageStartupMessages({ lapply(required_packages, library, character.only = TRUE) })
+```
+
+```{r global-theme}
+theme_jaa <- theme_bw(base_size = 12) + theme(
+  text = element_text(color = "black"),
+  axis.text = element_text(color = "black"),
+  axis.title = element_text(color = "black", face = "bold"),
+  plot.title = element_text(face = "bold", size = 13, color = "black"),
+  plot.subtitle = element_text(size = 10, color = "black"),
+  panel.grid.minor = element_blank(),
+  legend.text = element_text(color = "black"),
+  legend.title = element_text(color = "black", face = "bold"),
+  strip.text = element_text(face = "bold", color = "black")
+)
+theme_set(theme_jaa)
+```
+
+# 2. Data loading from GitHub repository
+
+```{r github-download}
+api_url <- "https://api.github.com/repos/luismiguelsoto/Landesque_Capital_and_Ideal_Distribution_Models_in_Tairona_chiefdoms/contents/GIS"
+respuesta <- GET(api_url)
+
+if (status_code(respuesta) != 200) {
+  stop("Connection to GitHub failed. Check the URL or API rate limits.")
+}
+
+archivos_github <- fromJSON(content(respuesta, "text", encoding = "UTF-8"))
+
+folder <- file.path(tempdir(), "GIS_JAA")
+dir.create(folder, showWarnings = FALSE, recursive = TRUE)
+
+for (i in 1:nrow(archivos_github)) {
+  if (!is.na(archivos_github$download_url[i])) {
+    dest_file <- file.path(folder, archivos_github$name[i])
+    if (!file.exists(dest_file)) {
+      download.file(archivos_github$download_url[i], destfile = dest_file, mode = "wb", quiet = TRUE)
+    }
+  }
+}
+
+cat(">>> Files downloaded to:", folder, "\n")
+cat(">>> Total files:", nrow(archivos_github), "\n")
+```
+
+```{r paths-and-data}
+dem     <- terra::rast(file.path(folder, "DEM_POLYGON_52KM.tif"))
+riofrio <- sf::st_read(file.path(folder, "RIO_FRIO_POLYGON_SURVEY.shp"), quiet = TRUE)
+rivers  <- sf::st_read(file.path(folder, "RIVERS_POLYGON_52KM.shp"), quiet = TRUE)
+
+sites_neg <- sf::st_read(file.path(folder, "NEGUANJE_POLYGONS_SITES.shp"), quiet = TRUE)
+sites_bur <- sf::st_read(file.path(folder, "BURITACA_POLYGONS_SITES.shp"), quiet = TRUE)
+sites_tai <- sf::st_read(file.path(folder, "TAIRONA_POLYGONS_SITES.shp"), quiet = TRUE)
+
+terr_neg <- sf::st_read(file.path(folder, "NEGUANJE_STRUCTURES.shp"), quiet = TRUE)
+terr_bur <- sf::st_read(file.path(folder, "BURITACA_STRUCTURES.shp"), quiet = TRUE)
+terr_tai <- sf::st_read(file.path(folder, "TAIRONA_STRUCTURES.shp"), quiet = TRUE)
+
+riofrio  <- sf::st_transform(riofrio, crs = sf::st_crs(dem))
+rivers   <- sf::st_transform(rivers,  crs = sf::st_crs(dem))
+sites_neg <- sf::st_transform(sites_neg, crs = sf::st_crs(dem))
+sites_bur <- sf::st_transform(sites_bur, crs = sf::st_crs(dem))
+sites_tai <- sf::st_transform(sites_tai, crs = sf::st_crs(dem))
+terr_neg  <- sf::st_transform(terr_neg,  crs = sf::st_crs(dem))
+terr_bur  <- sf::st_transform(terr_bur,  crs = sf::st_crs(dem))
+terr_tai  <- sf::st_transform(terr_tai,  crs = sf::st_crs(dem))
+
+sites_neg$Period <- "Neguanje (AD 100-700)"
+sites_bur$Period <- "Buritaca (AD 700-1000)"
+sites_tai$Period <- "Tairona (AD 1000-1600)"
+sites_sf <- rbind(sites_neg, sites_bur, sites_tai)
+
+terr_neg$Period <- "Neguanje (AD 100-700)"
+terr_bur$Period <- "Buritaca (AD 700-1000)"
+terr_tai$Period <- "Tairona (AD 1000-1600)"
+
+common_cols <- c("UTM_East", "UTM_North", "Diam_Terra", "Period")
+terrazas <- rbind(terr_neg[, common_cols], terr_bur[, common_cols], terr_tai[, common_cols])
+
+all_structures_path <- file.path(folder, "ALL_STRUCTURES.shp")
+if (file.exists(all_structures_path)) {
+  all_structures <- sf::st_read(all_structures_path, quiet = TRUE)
+  if (!is.na(sf::st_crs(all_structures)) && !is.na(sf::st_crs(dem)) &&
+      sf::st_crs(all_structures) != sf::st_crs(dem)) {
+    all_structures <- sf::st_transform(all_structures, sf::st_crs(dem))
+  }
+} else {
+  all_structures <- terrazas
+}
+
+cat(">>> DATA LOADING SUMMARY:\n")
+cat(" - DEM resolution:", round(terra::res(dem)[1], 1), "m\n")
+cat(" - Survey area:", round(as.numeric(sf::st_area(riofrio)) / 1e6, 1), "km2\n")
+cat(" - Total terraces:", nrow(terrazas), "\n")
+cat("   Neguanje:", nrow(terr_neg), "| Buritaca:", nrow(terr_bur), "| Tairona:", nrow(terr_tai), "\n")
+cat(" - Total sites:", nrow(sites_sf), "\n")
+cat("   Neguanje:", nrow(sites_neg), "| Buritaca:", nrow(sites_bur), "| Tairona:", nrow(sites_tai), "\n")
+cat(" - River segments:", nrow(rivers), "\n")
+```
+
+# 3. Helper functions
+
+```{r helpers}
+make_coord_key <- function(x, y, digits = 1) paste0(round(x, digits), "_", round(y, digits))
+
+period_short <- function(x) dplyr::case_when(
+  grepl("Neguanje", x) ~ "Neguanje\n(AD 100-700)",
+  grepl("Buritaca", x) ~ "Buritaca\n(AD 700-1000)",
+  grepl("Tairona",  x) ~ "Tairona\n(AD 1000-1600)",
+  TRUE ~ x
+)
+
+period_factor <- function(x) {
+  factor(x, levels = c(
+    "Neguanje\n(AD 100-700)",
+    "Buritaca\n(AD 700-1000)",
+    "Tairona\n(AD 1000-1600)"
+  ))
+}
+
+make_glm_response <- function(model, data, predictors, n_grid = 200) {
+  med_vals <- apply(data[, predictors, drop = FALSE], 2, median, na.rm = TRUE)
+  out_list <- list()
+  for (v in predictors) {
+    grid_df <- as.data.frame(matrix(rep(med_vals, each = n_grid), nrow = n_grid, byrow = FALSE))
+    names(grid_df) <- predictors
+    grid_df[[v]] <- seq(min(data[[v]], na.rm = TRUE), max(data[[v]], na.rm = TRUE), length.out = n_grid)
+    pred <- predict(model, newdata = grid_df, type = "link", se.fit = TRUE)
+    grid_df$fit   <- plogis(pred$fit)
+    grid_df$lower <- plogis(pred$fit - 1.96 * pred$se.fit)
+    grid_df$upper <- plogis(pred$fit + 1.96 * pred$se.fit)
+    grid_df$x <- grid_df[[v]]
+    grid_df$variable <- v
+    out_list[[v]] <- grid_df[, c("x", "fit", "lower", "upper", "variable")]
+  }
+  do.call(rbind, out_list)
+}
+
+soil_labels <- c("1. Very Low","2. Low","3. Medium-Low","4. Medium-High","5. High","6. Optimal")
+soil_colors <- c("#5D3A00","#A66C2D","#D9B38C","#B5E28A","#4CAF50","#1B5E20")
+
+raster_to_df <- function(r, class_labels = soil_labels) {
+  df <- as.data.frame(r, xy = TRUE, na.rm = TRUE)
+  names(df)[3] <- "class"
+  df$class <- factor(df$class, levels = seq_along(class_labels), labels = class_labels)
+  df
+}
+
+make_spatial_blocks_square <- function(x, raster_layer, size = 2000, k = 5, column = "y") {
+  cv_obj <- NULL
+
+  if ("cv_spatial" %in% getNamespaceExports("blockCV")) {
+    invisible(utils::capture.output({
+      cv_obj <- blockCV::cv_spatial(
+        x = x, column = column, r = raster_layer,
+        size = size, k = k, selection = "systematic",
+        hexagon = FALSE, progress = FALSE, report = FALSE, plot = FALSE
+      )
+    }))
+  } else {
+    invisible(utils::capture.output({
+      cv_obj <- blockCV::spatialBlock(
+        speciesData = x, species = column, rasterLayer = raster_layer,
+        theRange = size, k = k, selection = "systematic",
+        showBlocks = FALSE
+      )
+    }))
+  }
+
+  if (is.null(cv_obj)) stop("Spatial blocking failed: blockCV did not return an object.")
+
+  k_out <- if (!is.null(cv_obj$k)) cv_obj$k else k
+  folds_list <- cv_obj$folds_list
+
+  if (!is.null(cv_obj$folds_ids)) {
+    fold_ids <- cv_obj$folds_ids
+  } else {
+    fold_ids <- rep(NA_integer_, nrow(x))
+    for (f in seq_len(k_out)) {
+      te <- folds_list[[f]][[2]]
+      if (length(te) > 0) fold_ids[te] <- f
+    }
+  }
+
+  list(
+    k = k_out,
+    folds_list = folds_list,
+    fold_ids = fold_ids,
+    blocks = cv_obj$blocks
+  )
+}
+
+make_block_count_table <- function(block_obj, y) {
+  out <- lapply(seq_len(block_obj$k), function(f) {
+    tr <- block_obj$folds_list[[f]][[1]]
+    te <- block_obj$folds_list[[f]][[2]]
+    c(
+      train_0 = sum(y[tr] == 0, na.rm = TRUE),
+      train_1 = sum(y[tr] == 1, na.rm = TRUE),
+      test_0  = sum(y[te] == 0, na.rm = TRUE),
+      test_1  = sum(y[te] == 1, na.rm = TRUE)
+    )
+  })
+  out <- as.data.frame(do.call(rbind, out))
+  rownames(out) <- seq_len(nrow(out))
+  zero_cols <- vapply(out, function(z) all(is.na(z) | z == 0), logical(1))
+  out[, !zero_cols, drop = FALSE]
+}
+
+get_block_labels <- function(blocks_sf, points = NULL, point_fold_col = NULL) {
+  candidate_cols <- c("folds_ids", "folds_id", "foldID", "fold_id", "folds", "fold", "id")
+  hit <- candidate_cols[candidate_cols %in% names(blocks_sf)]
+  if (length(hit) > 0) return(as.character(blocks_sf[[hit[1]]]))
+  if (!is.null(points) && !is.null(point_fold_col) && point_fold_col %in% names(points)) {
+    idx <- sf::st_intersects(blocks_sf, points)
+    lab <- vapply(idx, function(ii) {
+      vals <- points[[point_fold_col]][ii]
+      vals <- vals[!is.na(vals)]
+      if (!length(vals)) return(NA_character_)
+      as.character(names(sort(table(vals), decreasing = TRUE)[1]))
+    }, character(1))
+    return(lab)
+  }
+  as.character(seq_len(nrow(blocks_sf)))
+}
+
+make_hillshade_df <- function(dem_raster, fact = 4, angle = 45, direction = 315) {
+  dem_agg <- terra::aggregate(dem_raster, fact = fact, fun = "mean", na.rm = TRUE)
+  slope_hs <- terra::terrain(dem_agg, v = "slope", unit = "radians")
+  aspect_hs <- terra::terrain(dem_agg, v = "aspect", unit = "radians")
+  hillshade <- terra::shade(slope_hs, aspect_hs, angle = angle, direction = direction)
+  hs_df <- as.data.frame(hillshade, xy = TRUE, na.rm = TRUE)
+  names(hs_df)[3] <- "hillshade"
+  hs_df
+}
+
+sample_skewness <- function(x) {
+  x <- x[is.finite(x)]
+  n <- length(x)
+  if (n < 3) return(NA_real_)
+  m <- mean(x)
+  s <- stats::sd(x)
+  if (is.na(s) || s == 0) return(0)
+  (n / ((n - 1) * (n - 2))) * sum(((x - m) / s)^3)
+}
+
+safe_shapiro_p <- function(x, max_n = 5000, seed = 123) {
+  x <- x[is.finite(x)]
+  if (length(x) < 3) return(NA_real_)
+  if (stats::sd(x) == 0) return(NA_real_)
+  if (length(x) > max_n) {
+    set.seed(seed)
+    x <- sample(x, max_n)
+  }
+  stats::shapiro.test(x)$p.value
+}
+
+format_p_bar <- function(p) {
+  ifelse(
+    is.na(p), NA_character_,
+    ifelse(
+      p < 1e-4, "p < 0.0001",
+      ifelse(
+        p < 0.001, "p < 0.001",
+        paste0("p = ", formatC(p, format = "f", digits = 2))
+      )
+    )
+  )
+}
+
+format_p_subtitle <- function(p, digits = 3) {
+  ifelse(
+    is.na(p), NA_character_,
+    ifelse(
+      p < 1e-4, "< 0.0001",
+      ifelse(
+        p < 0.001, "< 0.001",
+        paste0("= ", formatC(p, format = "f", digits = digits))
+      )
+    )
+  )
+}
+
+make_omnibus_subtitle <- function(test_obj, stat_digits = 2, p_digits = 3) {
+  if (identical(test_obj$omnibus_label, "Kruskal-Wallis")) {
+    paste0(
+      "Kruskal-Wallis = ",
+      formatC(test_obj$omnibus_statistic, format = "f", digits = stat_digits),
+      ", p ",
+      format_p_subtitle(test_obj$omnibus_p, digits = p_digits)
+    )
+  } else if (identical(test_obj$omnibus_label, "ANOVA")) {
+    paste0(
+      "ANOVA F = ",
+      formatC(test_obj$omnibus_statistic, format = "f", digits = stat_digits),
+      ", p ",
+      format_p_subtitle(test_obj$omnibus_p, digits = p_digits)
+    )
+  } else {
+    paste0(
+      test_obj$omnibus_label,
+      ": p ",
+      format_p_subtitle(test_obj$omnibus_p, digits = p_digits)
+    )
+  }
+}
+
+choose_group_test <- function(df, value_col, group_col, y_step = 0.08) {
+  dd <- df %>%
+    dplyr::select(all_of(c(value_col, group_col))) %>%
+    dplyr::rename(.value = all_of(value_col), .group = all_of(group_col)) %>%
+    dplyr::filter(is.finite(.value), !is.na(.group)) %>%
+    dplyr::mutate(.group = factor(.group))
+
+  if (nlevels(dd$.group) < 2) stop("At least two groups are required.")
+  if (nrow(dd) == 0) stop("No valid rows available for testing.")
+
+  shapiro_tbl <- dd %>%
+    dplyr::group_by(.group) %>%
+    dplyr::summarise(
+      n = dplyr::n(),
+      shapiro_p = safe_shapiro_p(.value),
+      .groups = "drop"
+    )
+
+  levene_p <- tryCatch({
+    as.numeric(car::leveneTest(.value ~ .group, data = dd)[1, "Pr(>F)"])
+  }, error = function(e) NA_real_)
+
+  normal_ok <- all(!is.na(shapiro_tbl$shapiro_p) & shapiro_tbl$shapiro_p > 0.05)
+  variance_ok <- !is.na(levene_p) && levene_p > 0.05
+
+  if (normal_ok && variance_ok) {
+    omnibus <- stats::aov(.value ~ .group, data = dd)
+    omnibus_p <- summary(omnibus)[[1]][["Pr(>F)"]][1]
+    omnibus_statistic <- summary(omnibus)[[1]][["F value"]][1]
+    omnibus_label <- "ANOVA"
+    method_label <- "Parametric"
+    pairwise <- rstatix::pairwise_t_test(
+      dd, .value ~ .group,
+      p.adjust.method = "holm",
+      pool.sd = FALSE
+    )
+  } else {
+    omnibus <- stats::kruskal.test(.value ~ .group, data = dd)
+    omnibus_p <- omnibus$p.value
+    omnibus_statistic <- unname(omnibus$statistic)
+    omnibus_label <- "Kruskal-Wallis"
+    method_label <- "Nonparametric"
+    pairwise <- rstatix::pairwise_wilcox_test(
+      dd, .value ~ .group,
+      p.adjust.method = "holm",
+      exact = FALSE
+    )
+  }
+
+  pairwise <- pairwise %>%
+    rstatix::add_y_position(
+      fun = "max",
+      data = dd,
+      formula = .value ~ .group,
+      step.increase = y_step
+    ) %>%
+    dplyr::mutate(
+      p_label = format_p_bar(p.adj)
+    )
+
+  list(
+    data = dd,
+    shapiro = shapiro_tbl,
+    levene_p = levene_p,
+    normal_ok = normal_ok,
+    variance_ok = variance_ok,
+    method_label = method_label,
+    omnibus_label = omnibus_label,
+    omnibus_statistic = omnibus_statistic,
+    omnibus_p = omnibus_p,
+    pairwise = pairwise
+  )
+}
+
+```
+
+# 4. Terrain predictors
+
+```{r terrain}
+dem_mask <- terra::mask(terra::crop(dem, terra::vect(riofrio)), terra::vect(riofrio))
+predictor_cols <- c("Elevation","Slope","TPI","Wetness_TWI","Dist_Channel_DEM")
+
+predictors_path <- file.path(folder, "PREDICTORS_STACK_V11.tif")
+
+if (file.exists(predictors_path)) {
+  predictors <- terra::rast(predictors_path)
+  names(predictors) <- predictor_cols
+  cat(">>> Predictors LOADED from:", predictors_path, "\n")
+} else {
+  var_elev <- dem_mask
+  names(var_elev) <- "Elevation"
+  
+  slope <- terra::terrain(dem_mask, v = "slope", unit = "degrees")
+  names(slope) <- "Slope"
+  
+  var_tpi <- terra::terrain(dem_mask, v = "TPI")
+  names(var_tpi) <- "TPI"
+  
+  fdir <- terra::terrain(dem_mask, v = "flowdir")
+  fac  <- terra::flowAccumulation(fdir)
+  slope_rad <- terra::clamp(slope * pi / 180, lower = 0.001, upper = 1.57)
+  var_twi <- log((fac + 1) / tan(slope_rad))
+  names(var_twi) <- "Wetness_TWI"
+  
+  channel_threshold <- 250
+  channel_cells <- fac >= channel_threshold
+  channel_cells[channel_cells == 0] <- NA
+  var_dist_channel <- terra::mask(terra::distance(channel_cells), dem_mask)
+  names(var_dist_channel) <- "Dist_Channel_DEM"
+  
+  predictors <- c(var_elev, slope, var_tpi, var_twi, var_dist_channel)
+  terra::writeRaster(predictors, predictors_path, overwrite = TRUE, datatype = "FLT4S")
+  cat(">>> Predictors GENERATED and SAVED to:", predictors_path, "\n")
+}
+
+cat(">>> PREDICTOR SUMMARY:\n")
+print(round(terra::global(predictors, fun = c("mean","sd","min","max"), na.rm = TRUE), 3))
+```
+
+# 5. Terrace de-duplication and model dataset
+
+```{r dedup}
+terrazas$UTM_East  <- sf::st_coordinates(terrazas)[, 1]
+terrazas$UTM_North <- sf::st_coordinates(terrazas)[, 2]
+terrazas$coord_key <- make_coord_key(terrazas$UTM_East, terrazas$UTM_North)
+
+tcp <- terrazas %>%
+  sf::st_drop_geometry() %>%
+  dplyr::group_by(coord_key) %>%
+  dplyr::summarise(
+    n_periods = dplyr::n_distinct(Period),
+    period_label = ifelse(n_periods == 1, dplyr::first(Period), NA_character_),
+    .groups = "drop"
+  )
+
+cat(">>> DUPLICATE DIAGNOSTIC:\n")
+print(
+  tcp %>%
+    dplyr::count(n_periods, name = "n_coords") %>%
+    dplyr::mutate(pct = round(100 * n_coords / sum(n_coords), 1))
+)
+
+terrazas_model <- terrazas %>%
+  dplyr::group_by(coord_key) %>%
+  dplyr::slice(1) %>%
+  dplyr::ungroup() %>%
+  dplyr::left_join(tcp, by = "coord_key")
+
+terrazas_v <- terra::vect(terrazas_model)
+
+vals_pres <- terra::extract(predictors, terrazas_v, ID = FALSE)
+complete_idx <- which(complete.cases(vals_pres))
+vals_pres <- vals_pres[complete_idx, ]
+terrazas_model <- terrazas_model[complete_idx, ]
+
+vals_pres$y <- 1
+vals_pres$UTM_East <- terrazas_model$UTM_East
+vals_pres$UTM_North <- terrazas_model$UTM_North
+vals_pres$coord_key <- terrazas_model$coord_key
+vals_pres$Temporal_Period <- terrazas_model$period_label
+
+cat(" - Terraces with complete predictor values:", nrow(vals_pres), "\n")
+
+n_abs <- nrow(vals_pres) * 2
+bg_path <- file.path(folder, "bg_points_V11.rds")
+
+if (file.exists(bg_path)) {
+  bg_points <- readRDS(bg_path)
+  cat(">>> Background points LOADED from:", bg_path, "\n")
+} else {
+  set.seed(123)
+  bg_points <- terra::spatSample(
+    dem_mask, size = n_abs, method = "random",
+    na.rm = TRUE, as.points = TRUE, xy = TRUE
+  )
+  saveRDS(bg_points, bg_path)
+  cat(">>> Background points GENERATED and SAVED to:", bg_path, "\n")
+}
+vals_abs <- terra::extract(predictors, bg_points, ID = TRUE)
+vals_abs <- vals_abs[complete.cases(vals_abs[, setdiff(names(vals_abs), "ID")]), ]
+coords_bg <- terra::crds(bg_points)[vals_abs$ID, ]
+
+vals_abs$y <- 0
+vals_abs$UTM_East <- coords_bg[, 1]
+vals_abs$UTM_North <- coords_bg[, 2]
+vals_abs$coord_key <- NA_character_
+vals_abs$Temporal_Period <- NA_character_
+vals_abs$ID <- NULL
+
+data_model <- rbind(vals_pres, vals_abs)
+data_scaled <- data_model
+data_scaled[, predictor_cols] <- scale(data_model[, predictor_cols])
+
+cat("\n>>> MODEL DATASET:\n")
+cat(" - Unique terrace presences:", sum(data_model$y == 1), "\n")
+cat(" - Background absences:", sum(data_model$y == 0), "\n")
+cat(" - Total:", nrow(data_model), "\n")
+```
+
+# 6. GLM specification, VIF diagnostics, and GAM sensitivity
+
+```{r glm-gam}
+ff <- y ~ Elevation + Slope + TPI + Wetness_TWI + Dist_Channel_DEM
+
+final_glm_scaled <- glm(ff, data = data_scaled, family = binomial)
+final_glm_raw    <- glm(ff, data = data_model,  family = binomial)
+
+vif_final <- car::vif(final_glm_scaled)
+glm_prob  <- predict(final_glm_scaled, type = "response")
+glm_auc   <- as.numeric(pROC::auc(pROC::roc(data_scaled$y, glm_prob, quiet = TRUE)))
+
+gam_f <- as.formula(
+  paste("y ~", paste(paste0("s(", predictor_cols, ", k=5)"), collapse = " + "))
+)
+model_gam <- mgcv::gam(gam_f, data = data_scaled, family = binomial, method = "REML")
+auc_gam <- as.numeric(pROC::auc(pROC::roc(data_scaled$y,
+  predict(model_gam, type = "response"), quiet = TRUE)))
+
+cat(">>> VIF DIAGNOSTIC:\n")
+print(round(vif_final, 3))
+cat(">>> GLM AUC:", round(glm_auc, 3), "| GAM AUC:", round(auc_gam, 3), "\n")
+cat(">>> GAM smooth-term summary:\n")
+print(summary(model_gam)$s.table)
+
+preferred_auc <- glm_auc
+data_scaled$residuals <- residuals(final_glm_scaled, type = "pearson")
+data_scaled$fitted    <- fitted(final_glm_scaled)
+```
+
+```{r summ-glm}
+cat("\n========== NUMERICAL SUMMARY: GLM AND GAM ==========\n")
+cat("GLM formula: y ~ Elevation + Slope + TPI + Wetness_TWI + Dist_Channel_DEM\n")
+cat("GLM training AUC:", round(glm_auc, 3), "\n")
+cat("GAM training AUC:", round(auc_gam, 3), "\n")
+cat("AUC improvement (GAM - GLM):", round(auc_gam - glm_auc, 3), "\n")
+cat("Max VIF:", round(max(vif_final), 3), "\n")
+cat("====================================================\n")
+```
+
+# 7. Residual spatial structure
+
+```{r moran}
+crs_res <- cbind(data_scaled$UTM_East, data_scaled$UTM_North)
+nb_r <- spdep::knn2nb(spdep::knearneigh(crs_res, k = 8))
+lw_r <- spdep::nb2listw(nb_r, style = "W")
+moran_test <- spdep::moran.test(data_scaled$residuals, lw_r)
+set.seed(999)
+moran_perm <- spdep::moran.mc(
+  data_scaled$residuals, lw_r, nsim = 10000,
+  alternative = "two.sided", zero.policy = TRUE
+)
+
+resid_sf <- sf::st_as_sf(data_scaled, coords = c("UTM_East","UTM_North"), crs = sf::st_crs(dem))
+vgm_res <- gstat::variogram(residuals ~ 1, data = resid_sf, cutoff = 3000, width = 250)
+```
+
+# 8. Spatial block partition
+
+```{r spatial-blocks, include=FALSE}
+all_pts <- sf::st_as_sf(data_model, coords = c("UTM_East","UTM_North"), crs = sf::st_crs(dem))
+all_pts$y <- data_model$y
+
+sb <- make_spatial_blocks_square(all_pts, predictors[[1]], size = 2000, k = 5)
+all_pts$spatial_block <- sb$fold_ids
+
+sb_counts <- make_block_count_table(sb, data_model$y)
+
+data_model$spatial_block <- sb$fold_ids
+data_scaled$spatial_block <- sb$fold_ids
+```
+
+# 9. Spatial cross-validation
+
+```{r spatial-cv}
+auc_cv <- rep(NA_real_, sb$k)
+
+for (fold in seq_len(sb$k)) {
+  tr <- sb$folds_list[[fold]][[1]]
+  te <- sb$folds_list[[fold]][[2]]
+
+  if (length(tr) == 0 || length(te) == 0) next
+  if (length(unique(data_model$y[tr])) < 2 || length(unique(data_model$y[te])) < 2) next
+
+  m <- glm(ff, data = data_model[tr, ], family = binomial)
+  p <- predict(m, newdata = data_model[te, ], type = "response")
+  auc_cv[fold] <- as.numeric(pROC::auc(pROC::roc(data_model$y[te], p, quiet = TRUE)))
+}
+
+auc_cv_mean <- mean(auc_cv, na.rm = TRUE)
+auc_cv_sd   <- sd(auc_cv, na.rm = TRUE)
+
+cat(">>> SPATIAL CV: Mean AUC =", round(auc_cv_mean, 3), "+-", round(auc_cv_sd, 3), "\n")
+cat(">>> Fold AUCs:", paste(round(auc_cv, 3), collapse = ", "), "\n")
+```
+
+# 9b. Spatially blocked random forest sensitivity analysis
+
+This section responds to Reviewer 1 (Section 3, GLM Specification), who suggested
+testing whether a spatially blocked random forest improves fit beyond the GLM and GAM.
+The same five spatial blocks from Section 8 are used to ensure geographic independence
+between training and test sets. The random forest is fitted using the `ranger` package
+with 1,000 trees and default `mtry` (floor of sqrt of number of predictors). This provides
+a fully non-linear, non-parametric benchmark against which to evaluate whether the
+moderate AUC of the GLM reflects model specification limits or genuine unexplained
+variation attributable to social, historical, or unmeasured environmental processes.
+
+```{r rf-training}
+# --- 9b.1 Training random forest on full dataset ---
+set.seed(42)
+rf_model <- ranger::ranger(
+  formula      = ff,
+  data         = data_model[, c("y", predictor_cols)],
+  num.trees    = 1000,
+  importance   = "permutation",
+  probability  = TRUE,
+  min.node.size = 5,
+  seed         = 42
+)
+
+rf_train_prob <- rf_model$predictions[, 2]
+rf_train_auc  <- as.numeric(pROC::auc(pROC::roc(
+  data_model$y, rf_train_prob, quiet = TRUE
+)))
+
+cat(">>> RANDOM FOREST TRAINING SUMMARY:\n")
+cat("  Trees:", rf_model$num.trees, "\n")
+cat("  mtry:", rf_model$mtry, "\n")
+cat("  Min node size:", rf_model$min.node.size, "\n")
+cat("  Training AUC (OOB-based probabilities):", round(rf_train_auc, 3), "\n")
+```
+
+```{r rf-spatial-cv}
+# --- 9b.2 Spatially blocked cross-validation for random forest ---
+auc_cv_rf <- rep(NA_real_, sb$k)
+
+for (fold in seq_len(sb$k)) {
+  tr <- sb$folds_list[[fold]][[1]]
+  te <- sb$folds_list[[fold]][[2]]
+
+  if (length(tr) == 0 || length(te) == 0) next
+  if (length(unique(data_model$y[tr])) < 2 ||
+      length(unique(data_model$y[te])) < 2) next
+
+  rf_fold <- ranger::ranger(
+    formula      = ff,
+    data         = data_model[tr, c("y", predictor_cols)],
+    num.trees    = 1000,
+    probability  = TRUE,
+    min.node.size = 5,
+    seed         = 42
+  )
+
+  rf_pred <- predict(rf_fold, data = data_model[te, predictor_cols])$predictions[, 2]
+  auc_cv_rf[fold] <- as.numeric(pROC::auc(pROC::roc(
+    data_model$y[te], rf_pred, quiet = TRUE
+  )))
+}
+
+auc_cv_rf_mean <- mean(auc_cv_rf, na.rm = TRUE)
+auc_cv_rf_sd   <- sd(auc_cv_rf, na.rm = TRUE)
+
+cat(">>> SPATIALLY BLOCKED RF CV:\n")
+cat("  Mean AUC:", round(auc_cv_rf_mean, 3), "+-", round(auc_cv_rf_sd, 3), "\n")
+cat("  Fold AUCs:", paste(round(auc_cv_rf, 3), collapse = ", "), "\n")
+```
+
+```{r rf-importance}
+# --- 9b.3 Variable importance ---
+rf_imp <- data.frame(
+  Variable = names(rf_model$variable.importance),
+  Importance = rf_model$variable.importance
+) %>%
+  dplyr::arrange(dplyr::desc(Importance)) %>%
+  dplyr::mutate(Variable = factor(Variable, levels = Variable))
+
+cat(">>> RF PERMUTATION IMPORTANCE:\n")
+print(rf_imp)
+```
+
+```{r rf-comparison-table, results='asis'}
+# --- 9b.4 Model comparison table: GLM vs GAM vs Random Forest ---
+model_comparison <- data.frame(
+  Model = c("GLM (binomial, logit link)",
+            "GAM (thin-plate splines, k=5)",
+            "Random Forest (ranger, 1000 trees)"),
+  Type = c("Parametric", "Semi-parametric", "Non-parametric"),
+  Training_AUC = c(round(glm_auc, 3),
+                   round(auc_gam, 3),
+                   round(rf_train_auc, 3)),
+  SpatialCV_AUC = c(paste0(round(auc_cv_mean, 3), " +/- ", round(auc_cv_sd, 3)),
+                    "---",
+                    paste0(round(auc_cv_rf_mean, 3), " +/- ", round(auc_cv_rf_sd, 3))),
+  Delta_vs_GLM = c("---",
+                   paste0("+", round(auc_gam - glm_auc, 3)),
+                   paste0("+", round(rf_train_auc - glm_auc, 3))),
+  Interpretability = c("High (coefficients)", "Moderate (smooth terms)", "Low (black box)")
+)
+
+cat("\n========== MODEL COMPARISON: GLM vs GAM vs RF ==========\n\n")
+print(knitr::kable(model_comparison, format = "simple", align = "llcccc",
+  caption = "Sensitivity analysis: model specification comparison"))
+cat("\n")
+
+# Interpretation
+glm_cv  <- round(auc_cv_mean, 3)
+rf_cv   <- round(auc_cv_rf_mean, 3)
+rf_gain <- round(auc_cv_rf_mean - auc_cv_mean, 3)
+
+cat("INTERPRETATION:\n")
+cat("  GLM spatial CV AUC:", glm_cv, "\n")
+cat("  RF  spatial CV AUC:", rf_cv, "\n")
+cat("  RF gain over GLM (spatial CV):", rf_gain, "\n\n")
+
+if (abs(rf_gain) <= 0.03) {
+  cat("  -> The random forest does NOT substantially improve spatially validated\n")
+  cat("     performance over the GLM. This confirms that the moderate AUC reflects\n")
+  cat("     genuine limits in environmental predictability rather than model\n")
+  cat("     specification constraints. The GLM is retained as the primary model\n")
+  cat("     because it provides interpretable coefficients for the suitability\n")
+  cat("     surface while achieving comparable spatially validated performance.\n")
+} else if (rf_gain > 0.03 && rf_gain <= 0.08) {
+  cat("  -> The random forest provides a modest improvement over the GLM in\n")
+  cat("     spatially validated performance, suggesting that some non-linear\n")
+  cat("     structure exists beyond what the GAM captures. However, the gain\n")
+  cat("     is moderate, and the GLM remains defensible as the primary model\n")
+  cat("     given its interpretability advantages.\n")
+} else {
+  cat("  -> The random forest provides a substantial improvement over the GLM,\n")
+  cat("     suggesting that the environmental signal contains non-linear structure\n")
+  cat("     that parametric and semi-parametric models do not fully capture.\n")
+  cat("     This should be discussed in the manuscript.\n")
+}
+cat("\n=========================================================\n")
+```
+
+# 10. Figure 4. GLM standardized coefficients and ROC curve
+
+```{r fig4, fig.width=8, fig.height=12}
+cs <- broom::tidy(final_glm_scaled, conf.int = TRUE) %>%
+  dplyr::filter(term != "(Intercept)") %>%
+  dplyr::mutate(
+    Dir = ifelse(estimate > 0, "Positive", "Negative"),
+    term = factor(term, levels = term[order(abs(estimate))])
+  )
+
+label_map <- c(
+  "Elevation" = "Elevation",
+  "Slope" = "Slope",
+  "TPI" = "TPI",
+  "Wetness_TWI" = "TWI",
+  "Dist_Channel_DEM" = "Dist. Channel"
+)
+cs$term_label <- factor(label_map[as.character(cs$term)],
+  levels = label_map[as.character(levels(cs$term))])
+
+p4a <- ggplot(cs, aes(x = term_label, y = estimate, fill = Dir)) +
+  geom_col(width = 0.6, color = "black", linewidth = 0.4) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2, color = "black") +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  scale_fill_manual(values = c(Positive = "#2E86AB", Negative = "#E63946")) +
+  coord_flip() +
+  labs(
+    title = "A) Standardized GLM coefficients",
+    x = NULL, y = "Coefficient", fill = "Direction"
+  )
+
+roc_obj <- pROC::roc(data_scaled$y, glm_prob, quiet = TRUE)
+roc_df <- data.frame(spec = roc_obj$specificities, sens = roc_obj$sensitivities)
+
+p4b <- ggplot(roc_df, aes(x = 1 - spec, y = sens)) +
+  geom_line(color = "#2E86AB", linewidth = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E63946") +
+  labs(
+    title = "B) ROC curve",
+    subtitle = paste0(
+      "Training AUC = ", round(glm_auc, 3),
+      " | Spatial CV AUC = ", round(auc_cv_mean, 3)
+    ),
+    x = "1 - Specificity", y = "Sensitivity"
+  )
+
+print(p4a / p4b)
+```
+
+```{r summ-fig4}
+cat("\n========== NUMERICAL SUMMARY: FIGURE 4 ==========\n")
+cat("4A. STANDARDIZED GLM COEFFICIENTS\n")
+for (i in 1:nrow(cs)) {
+  cat(sprintf(
+    "  %s: b=%.3f [%.3f, %.3f] p=%s\n",
+    cs$term[i], cs$estimate[i], cs$conf.low[i], cs$conf.high[i], format.pval(cs$p.value[i], 3)
+  ))
+}
+cat("4B. ROC CURVE\n")
+cat("   Training AUC:", round(glm_auc, 3), "| Spatial CV AUC:", round(auc_cv_mean, 3), "\n")
+cat("=================================================\n")
+```
+
+# 11. Figure 5. GLM response plots
+
+```{r fig5, fig.width=16, fig.height=3.5}
+rdf <- make_glm_response(final_glm_scaled, data_scaled, predictor_cols)
+
+rdf$variable <- dplyr::recode(rdf$variable,
+  "Dist_Channel_DEM" = "Dist. Channel",
+  "Wetness_TWI" = "Wetness_TWI"
+)
+
+ggplot(rdf, aes(x = x, y = fit)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "#B5E28A") +
+  geom_line(color = "black", linewidth = 0.8) +
+  facet_wrap(~ variable, scales = "free_x", ncol = 5) +
+  labs(
+    title = "GLM response plots",
+    x = "Standardized value", y = "P(terrace)"
+  )
+```
+
+```{r summ-fig5}
+cat("\n========== NUMERICAL SUMMARY: FIGURE 5 ==========\n")
+for (v in unique(rdf$variable)) {
+  s <- rdf[rdf$variable == v, ]
+  cat(sprintf("  %s: P range %.3f to %.3f\n", v, min(s$fit), max(s$fit)))
+}
+cat("=================================================\n")
+```
+
+# 12. Figure 6. Residual variogram and spatial block partition
+
+```{r fig6, fig.width=10, fig.height=14}
+p_var <- ggplot(vgm_res, aes(x = dist, y = gamma)) +
+  geom_point(color = "#E63946", size = 3) +
+  geom_line(color = "#2E86AB", linewidth = 0.7) +
+  geom_hline(yintercept = var(data_scaled$residuals), linetype = "dashed", color = "black") +
+  labs(
+    title = "A) Residual variogram",
+    subtitle = paste0(
+      "Moran's I = ", round(moran_test$estimate[1], 3),
+      ", permutation p ",
+      ifelse(moran_perm$p.value < 0.001, "< 0.001", paste0("= ", round(moran_perm$p.value, 3)))
+    ),
+    x = "Distance (m)", y = "Semivariance"
+  )
+
+blocks_sf <- sf::st_as_sf(sb$blocks)
+blocks_sf$block_label <- get_block_labels(blocks_sf, all_pts, "spatial_block")
+block_centroids <- suppressWarnings(sf::st_centroid(blocks_sf))
+block_centroids$block_label <- blocks_sf$block_label
+
+dem_agg <- terra::aggregate(dem_mask, fact = 4, fun = "mean", na.rm = TRUE)
+dem_df <- as.data.frame(dem_agg, xy = TRUE, na.rm = TRUE)
+names(dem_df)[3] <- "elev"
+
+p_blk <- ggplot() +
+  geom_raster(data = dem_df, aes(x = x, y = y, fill = elev)) +
+  scale_fill_gradient(low = "gray30", high = "gray95", guide = "none") +
+  geom_sf(data = blocks_sf, fill = NA, color = "#E63946", linewidth = 0.6) +
+  geom_sf_text(
+    data = block_centroids %>% dplyr::filter(!is.na(block_label)),
+    aes(label = block_label), size = 5, fontface = "bold", color = "black"
+  ) +
+  geom_sf(data = riofrio, fill = NA, color = "black", linewidth = 0.8) +
+  ggspatial::annotation_scale(
+    location = "bl", width_hint = 0.2,
+    text_col = "black", line_col = "black", text_cex = 0.8,
+    bar_cols = c("black", "white")
+  ) +
+  ggspatial::annotation_north_arrow(
+    location = "tr", which_north = "true",
+    style = ggspatial::north_arrow_fancy_orienteering(
+      text_col = "black", line_col = "black", fill = c("black", "black")
+    )
+  ) +
+  coord_sf(datum = sf::st_crs(dem)) +
+  labs(
+    title = "B) Spatial block partition for cross-validation",
+    subtitle = paste0(sb$k, " spatial folds, approximately 2 km blocks")
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(face = "bold", size = 13, color = "black"),
+    plot.subtitle = element_text(size = 10, color = "black")
+  )
+
+print(p_var / p_blk + patchwork::plot_layout(heights = c(1, 1.4)))
+```
+
+```{r summ-fig6}
+cat("\n========== NUMERICAL SUMMARY: FIGURE 6 ==========\n")
+cat("6A. RESIDUAL VARIOGRAM\n")
+cat(" - Moran's I:", round(moran_test$estimate[1], 4), "\n")
+cat(" - Permutation p (10,000):", format.pval(moran_perm$p.value, 3), "\n")
+cat(" - Variogram bins:", nrow(vgm_res), "\n")
+cat(" - Semivariance at shortest lag:", round(vgm_res$gamma[1], 4), "\n")
+cat(" - Semivariance at longest lag:", round(vgm_res$gamma[nrow(vgm_res)], 4), "\n")
+cat("6B. SPATIAL BLOCKS\n")
+cat(" - Blocks:", sb$k, "(square, ~2 km)\n")
+cat(" - Fold composition:\n")
+print(sb_counts)
+cat("=================================================\n")
+```
+
+# 13. Suitability surface and original quantile classification
+
+```{r suitability}
+suit_map <- terra::predict(predictors, final_glm_raw, type = "response")
+names(suit_map) <- "Suitability"
+vals_map <- terra::values(suit_map, mat = FALSE, na.rm = TRUE)
+
+breaks <- stats::quantile(vals_map, probs = seq(0, 1, length.out = 7), na.rm = TRUE)
+breaks[1] <- breaks[1] - 0.001
+
+rcl_mat <- matrix(c(
+  breaks[1], breaks[2], 1,
+  breaks[2], breaks[3], 2,
+  breaks[3], breaks[4], 3,
+  breaks[4], breaks[5], 4,
+  breaks[5], breaks[6], 5,
+  breaks[6], breaks[7], 6
+), ncol = 3, byrow = TRUE)
+
+suit_class <- terra::classify(suit_map, rcl_mat, include.lowest = TRUE)
+names(suit_class) <- "Suit_Class"
+
+class_freq_raw <- terra::freq(suit_class)
+class_freq <- class_freq_raw[class_freq_raw$value %in% 1:6, ]
+class_freq$pct <- round(100 * class_freq$count / sum(class_freq$count), 1)
+
+cat(">>> SUITABILITY RANGE:", round(min(vals_map), 3), "to", round(max(vals_map), 3), "\n")
+cat(">>> QUANTILE-BASED BREAKS:\n")
+print(data.frame(
+  Class = 1:6,
+  Lower = round(breaks[1:6], 3),
+  Upper = round(breaks[2:7], 3),
+  Landscape_pct = class_freq$pct
+))
+```
+
+# 14. Figure 7. Agricultural suitability model and observed vs expected
+
+```{r fig7a, fig.width=10, fig.height=10}
+suit_df <- raster_to_df(suit_class)
+
+Figure_7A <- ggplot() +
+  geom_raster(data = suit_df, aes(x = x, y = y, fill = class)) +
+  scale_fill_manual(values = soil_colors, name = "Agricultural suitability", drop = FALSE) +
+  geom_sf(data = rivers, color = "#1E88E5", linewidth = 0.5) +
+  geom_sf(data = riofrio, fill = NA, color = "black", linewidth = 0.8) +
+  ggspatial::annotation_north_arrow(
+    location = "tr", which_north = "true",
+    style = ggspatial::north_arrow_fancy_orienteering(
+      text_col = "black", line_col = "black", fill = c("black", "black")
+    )
+  ) +
+  ggspatial::annotation_scale(
+    location = "bl", bar_cols = c("black", "white"),
+    text_col = "black", line_col = "black"
+  ) +
+  coord_sf(datum = sf::st_crs(dem)) +
+  labs(
+    title = "A) Agricultural suitability model",
+    subtitle = paste0("Spatial CV AUC = ", round(auc_cv_mean, 3))
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(face = "bold", size = 13, color = "black"),
+    plot.subtitle = element_text(size = 10, color = "black"),
+    legend.text = element_text(color = "black", size = 9),
+    legend.title = element_text(color = "black", face = "bold", size = 10)
+  )
+
+print(Figure_7A)
+```
+
+```{r fig7b, fig.width=10, fig.height=6}
+tv <- terra::vect(terrazas_model)
+terrazas_model$Suit_Class <- terra::extract(suit_class, tv, ID = FALSE)$Suit_Class
+
+ts <- terrazas_model %>%
+  sf::st_drop_geometry() %>%
+  dplyr::filter(!is.na(Suit_Class)) %>%
+  dplyr::count(Suit_Class, name = "n") %>%
+  dplyr::mutate(pct = round(100 * n / sum(n), 1))
+
+cmp_landscape <- data.frame(Class = class_freq$value, Pct = class_freq$pct, Type = "Landscape Availability")
+cmp_terraces  <- data.frame(Class = ts$Suit_Class,    Pct = ts$pct,        Type = "Terrace Location")
+cmp <- rbind(cmp_landscape, cmp_terraces)
+cmp$Label <- soil_labels[cmp$Class]
+cmp$Label <- factor(cmp$Label, levels = soil_labels)
+
+chisq_terr <- suppressWarnings(
+  chisq.test(x = ts$n, p = class_freq$count / sum(class_freq$count))
+)
+
+ggplot(cmp, aes(x = Label, y = Pct, fill = Type)) +
+  geom_col(position = position_dodge(0.7), width = 0.6, color = "black", linewidth = 0.3) +
+  geom_text(
+    aes(label = paste0(Pct, "%")),
+    position = position_dodge(0.7), vjust = -0.5,
+    size = 3, color = "black", fontface = "bold"
+  ) +
+  scale_fill_manual(values = c("Landscape Availability" = "#BDBDBD", "Terrace Location" = "#E63946")) +
+  labs(
+    title = "B) Observed vs expected terrace distribution",
+    subtitle = paste0(
+      "Chi-sq = ", round(chisq_terr$statistic, 2),
+      ", df = ", chisq_terr$parameter, ", p ",
+      ifelse(chisq_terr$p.value < 0.001, "< 0.001", round(chisq_terr$p.value, 3))
+    ),
+    x = "Suitability class", y = "%", fill = NULL
+  ) +
+  theme(legend.position = "bottom")
+```
+
+```{r summ-fig7}
+cat("\n========== NUMERICAL SUMMARY: FIGURE 7 ==========\n")
+cat("7A. AGRICULTURAL SUITABILITY MAP (quantile classes)\n")
+for (i in seq_len(nrow(class_freq))) {
+  cl <- class_freq$value[i]
+  cat(sprintf(
+    "   Class %d: %.3f-%.3f, landscape=%.1f%%\n",
+    cl, breaks[cl], breaks[cl + 1], class_freq$pct[i]
+  ))
+}
+cat("   Spatial CV AUC:", round(auc_cv_mean, 3), "\n")
+cat("7B. CHI-SQUARE (Observed vs Expected)\n")
+cat("   Chi-sq:", round(chisq_terr$statistic, 2), "| p:", format.pval(chisq_terr$p.value, 3), "\n")
+merged_summ <- merge(
+  data.frame(Class = class_freq$value, land_pct = class_freq$pct),
+  data.frame(Class = ts$Suit_Class, terr_pct = ts$pct),
+  by = "Class", all.x = TRUE
+)
+merged_summ$terr_pct[is.na(merged_summ$terr_pct)] <- 0
+for (i in seq_len(nrow(merged_summ))) {
+  cat(sprintf(
+    "   Class %d: landscape=%.1f%%, terraces=%.1f%%\n",
+    merged_summ$Class[i], merged_summ$land_pct[i], merged_summ$terr_pct[i]
+  ))
+}
+cat("=================================================\n")
+```
+
+# 15. Figure 8. Settlement suitability distribution by period
+
+```{r fig8-data}
+sp <- sf::st_point_on_surface(sites_sf)
+sv <- terra::vect(sp)
+
+ss <- cbind(
+  sf::st_drop_geometry(sp),
+  terra::extract(suit_class, sv, ID = FALSE)
+)
+names(ss)[ncol(ss)] <- "Suit_Class"
+
+ss_sum <- ss %>%
+  dplyr::filter(!is.na(Suit_Class)) %>%
+  dplyr::group_by(Period, Suit_Class) %>%
+  dplyr::summarise(n = n(), .groups = "drop") %>%
+  dplyr::group_by(Period) %>%
+  dplyr::mutate(pct = round(100 * n / sum(n), 1))
+
+sw <- ss_sum %>%
+  dplyr::select(Period, Suit_Class, n) %>%
+  tidyr::pivot_wider(names_from = Suit_Class, values_from = n, values_fill = 0)
+
+chisq_temp <- chisq.test(sw[, -1])
+```
+
+```{r fig8, fig.width=16, fig.height=14}
+suit_df <- raster_to_df(suit_class)
+
+ss_p <- ss_sum %>%
+  dplyr::mutate(
+    PS = factor(
+      dplyr::case_when(
+        grepl("Neguanje", Period) ~ "Neguanje\n(AD 100\u2013700)",
+        grepl("Buritaca", Period) ~ "Buritaca\n(AD 700\u20131000)",
+        grepl("Tairona",  Period) ~ "Tairona\n(AD 1000\u20131600)"
+      ),
+      levels = c("Neguanje\n(AD 100\u2013700)", "Buritaca\n(AD 700\u20131000)", "Tairona\n(AD 1000\u20131600)")
+    ),
+    SC = factor(Suit_Class, levels = 1:6, labels = soil_labels)
+  )
+
+p_bars <- ggplot(ss_p, aes(x = SC, y = pct, fill = SC)) +
+  geom_col(width = 0.7, color = "black", linewidth = 0.3) +
+  geom_text(
+    aes(label = paste0(pct, "%")),
+    vjust = -0.5,
+    size = 3, color = "black", fontface = "bold"
+  ) +
+  scale_fill_manual(values = soil_colors, guide = "none") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  facet_wrap(~ PS, ncol = 3) +
+  labs(
+    title = "Settlement suitability distribution by period",
+    subtitle = paste0(
+      "Chi\u2013sq = ", round(chisq_temp$statistic, 2),
+      ", df = ", chisq_temp$parameter, ", p ",
+      ifelse(chisq_temp$p.value < 0.001, "< 0.001", round(chisq_temp$p.value, 3))
+    ),
+    x = NULL, y = "Sites (%)"
+  ) +
+  theme(
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    strip.text = element_text(face = "bold", size = 11)
+  )
+
+mk_gg_map <- function(per) {
+  pd <- sites_sf %>% dplyr::filter(Period == per)
+  short_label <- dplyr::case_when(
+    grepl("Neguanje", per) ~ "Neguanje\n(AD 100\u2013700)",
+    grepl("Buritaca", per) ~ "Buritaca\n(AD 700\u20131000)",
+    grepl("Tairona",  per) ~ "Tairona\n(AD 1000\u20131600)"
+  )
+
+  ggplot() +
+    geom_raster(data = suit_df, aes(x = x, y = y, fill = class)) +
+    scale_fill_manual(values = soil_colors, name = "Suit.", drop = FALSE) +
+    geom_sf(data = riofrio, fill = NA, color = "black", linewidth = 0.6) +
+    geom_sf(data = pd, fill = "red", color = "blue", linewidth = 0.2) +
+    ggspatial::annotation_north_arrow(
+      location = "tr", which_north = "true",
+      style = ggspatial::north_arrow_fancy_orienteering(
+        text_col = "black", line_col = "black", fill = c("black", "black")
+      ),
+      height = grid::unit(1.2, "cm"), width = grid::unit(1.2, "cm")
+    ) +
+    ggspatial::annotation_scale(
+      location = "bl",
+      bar_cols = c("black", "white"), text_col = "black", line_col = "black",
+      text_cex = 0.7
+    ) +
+    coord_sf(datum = sf::st_crs(dem)) +
+    labs(title = short_label) +
+    theme_void() +
+    theme(
+      plot.title = element_text(face = "bold", size = 12, color = "black"),
+      legend.text = element_text(size = 7),
+      legend.title = element_text(size = 8)
+    )
+}
+
+p_neg <- mk_gg_map("Neguanje (AD 100-700)")
+p_bur <- mk_gg_map("Buritaca (AD 700-1000)")
+p_tai <- mk_gg_map("Tairona (AD 1000-1600)")
+
+p_maps <- (p_neg + p_bur + p_tai + patchwork::plot_layout(ncol = 3, guides = "collect")) &
+  theme(legend.position = "bottom")
+
+print(p_bars / p_maps + patchwork::plot_layout(heights = c(1, 1.2)))
+```
+
+```{r summ-fig8}
+cat("\n========== NUMERICAL SUMMARY: FIGURE 8 ==========\n")
+cat("Temporal chi-sq:", round(chisq_temp$statistic, 2), "| p:", format.pval(chisq_temp$p.value, 3), "\n")
+print(as.data.frame(ss_sum))
+cat("=================================================\n")
+```
+
+# 16. Figure 9. Terrace diameter distributions by suitability zone
+
+```{r fig9-data}
+terr_base <- terrazas_model %>%
+  sf::st_drop_geometry() %>%
+  dplyr::select(-dplyr::any_of(c("Suit_Class", "Suit_Prob")))
+
+terr_suit <- cbind(
+  terr_base,
+  terra::extract(suit_map, tv, ID = FALSE),
+  terra::extract(suit_class, tv, ID = FALSE)
+)
+colnames(terr_suit)[(ncol(terr_suit) - 1):ncol(terr_suit)] <- c("Suit_Prob", "Suit_Class")
+
+tsz <- terr_suit %>%
+  dplyr::filter(!is.na(Suit_Class), !is.na(Diam_Terra)) %>%
+  dplyr::mutate(
+    zone = factor(
+      dplyr::case_when(
+        Suit_Class <= 2 ~ "Suboptimal (1-2)",
+        Suit_Class <= 4 ~ "Intermediate (3-4)",
+        TRUE ~ "Optimal (5-6)"
+      ),
+      levels = c("Suboptimal (1-2)", "Intermediate (3-4)", "Optimal (5-6)")
+    )
+  )
+
+global_q90 <- as.numeric(stats::quantile(tsz$Diam_Terra, 0.90, na.rm = TRUE))
+global_q95 <- as.numeric(stats::quantile(tsz$Diam_Terra, 0.95, na.rm = TRUE))
+global_q99 <- as.numeric(stats::quantile(tsz$Diam_Terra, 0.99, na.rm = TRUE))
+
+shape_summary <- tsz %>%
+  dplyr::group_by(zone) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    mean = round(mean(Diam_Terra, na.rm = TRUE), 2),
+    median = round(median(Diam_Terra, na.rm = TRUE), 2),
+    sd = round(sd(Diam_Terra, na.rm = TRUE), 2),
+    q75 = round(quantile(Diam_Terra, 0.75, na.rm = TRUE), 2),
+    q90 = round(quantile(Diam_Terra, 0.90, na.rm = TRUE), 2),
+    q95 = round(quantile(Diam_Terra, 0.95, na.rm = TRUE), 2),
+    q99 = round(quantile(Diam_Terra, 0.99, na.rm = TRUE), 2),
+    max = round(max(Diam_Terra, na.rm = TRUE), 2),
+    skewness = round(sample_skewness(Diam_Terra), 3),
+    n_ge_global_q95 = sum(Diam_Terra >= global_q95, na.rm = TRUE),
+    pct_ge_global_q95 = round(100 * mean(Diam_Terra >= global_q95, na.rm = TRUE), 2),
+    .groups = "drop"
+  )
+
+tail_long <- shape_summary %>%
+  dplyr::select(zone, q90, q95, q99, max) %>%
+  tidyr::pivot_longer(
+    cols = c(q90, q95, q99, max),
+    names_to = "tail_stat",
+    values_to = "diameter"
+  ) %>%
+  dplyr::mutate(
+    tail_stat = factor(
+      tail_stat,
+      levels = c("q90", "q95", "q99", "max"),
+      labels = c("90th percentile", "95th percentile", "99th percentile", "Maximum")
+    )
+  )
+```
+
+
+```{r fig9-tests, include=FALSE}
+fig9_test <- choose_group_test(tsz, "Diam_Terra", "zone", y_step = 0.10)
+```
+
+```{r fig9, fig.width=14, fig.height=11}
+zone_cols <- c(
+  "Suboptimal (1-2)" = "#E63946",
+  "Intermediate (3-4)" = "#F4A261",
+  "Optimal (5-6)" = "#2A9D8F"
+)
+
+p9a <- ggplot(fig9_test$data, aes(x = .group, y = .value, fill = .group)) +
+  geom_boxplot(
+    width = 0.22, color = "black", linewidth = 0.35,
+    outlier.shape = 16, outlier.size = 1.2, outlier.alpha = 0.8
+  ) +
+  ggpubr::stat_pvalue_manual(
+    fig9_test$pairwise,
+    label = "p_label",
+    tip.length = 0.012,
+    bracket.size = 0.4,
+    bracket.shorten = 0.03,
+    size = 4,
+    vjust = 0.2
+  ) +
+  scale_fill_manual(values = zone_cols) +
+  scale_y_continuous(expand = expansion(mult = c(0.04, 0.20))) +
+  labs(
+    title = "A) Boxplot by suitability zone",
+    subtitle = make_omnibus_subtitle(fig9_test),
+    x = "Zone", y = "Terrace diameter (m)"
+  ) +
+  theme(legend.position = "none")
+
+p9b <- ggplot(tsz, aes(x = Diam_Terra, fill = zone)) +
+  geom_histogram(bins = 35, color = "white", alpha = 0.9) +
+  facet_wrap(~ zone, ncol = 1, scales = "free_y") +
+  scale_fill_manual(values = zone_cols) +
+  labs(
+    title = "B) Histograms by suitability zone",
+    subtitle = "Right-skew and upper-tail structure",
+    x = "Terrace diameter (m)", y = "Frequency"
+  ) +
+  theme(legend.position = "none")
+
+p9c <- ggplot(tsz, aes(x = Diam_Terra, color = zone)) +
+  stat_ecdf(linewidth = 1) +
+  geom_vline(xintercept = global_q95, linetype = "dashed", color = "black") +
+  scale_color_manual(values = zone_cols) +
+  labs(
+    title = "C) ECDF by suitability zone",
+    subtitle = paste0("Dashed line = global 95th percentile (", round(global_q95, 2), " m)"),
+    x = "Terrace diameter (m)", y = "Cumulative proportion", color = "Zone"
+  )
+
+p9d <- ggplot(tail_long, aes(x = tail_stat, y = diameter, group = zone, color = zone)) +
+  geom_line(linewidth = 0.9) +
+  geom_point(size = 3) +
+  scale_color_manual(values = zone_cols) +
+  labs(
+    title = "D) Upper-tail comparison",
+    subtitle = "90th, 95th, 99th percentiles and maximum values",
+    x = NULL, y = "Terrace diameter (m)", color = "Zone"
+  )
+
+print((p9a + p9b) / (p9c + p9d))
+```
+
+
+```{r summ-fig9}
+cat("
+========== NUMERICAL SUMMARY: FIGURE 9 ==========
+")
+cat("Global thresholds:
+")
+cat(" - 90th percentile:", round(global_q90, 2), "m
+")
+cat(" - 95th percentile:", round(global_q95, 2), "m
+")
+cat(" - 99th percentile:", round(global_q99, 2), "m
+
+")
+
+cat("Automatic assumption screening:
+")
+print(fig9_test$shapiro)
+cat("Levene p:", format.pval(fig9_test$levene_p, 3), "
+")
+cat("Selected framework:", fig9_test$method_label, "
+")
+cat("Omnibus test:", fig9_test$omnibus_label, "
+")
+cat("Omnibus p:", format.pval(fig9_test$omnibus_p, 3), "
+
+")
+
+cat("Pairwise comparisons (Holm-adjusted):
+")
+print(fig9_test$pairwise %>% dplyr::select(group1, group2, p, p.adj, p_label, y.position))
+cat("
+Distribution summary:
+")
+print(shape_summary)
+
+largest_terraces <- tsz %>%
+  dplyr::arrange(dplyr::desc(Diam_Terra)) %>%
+  dplyr::select(zone, Diam_Terra, Suit_Class, Suit_Prob) %>%
+  dplyr::slice_head(n = 15)
+
+cat("
+Top 15 largest terraces:
+")
+print(largest_terraces)
+cat("=================================================
+")
+```
+
+# 17. Figure 10. Optimal land access by period
+
+```{r catchment, include=FALSE}
+oz <- suit_class
+oz[oz < 5] <- NA
+
+sps <- suppressWarnings(sf::st_point_on_surface(sites_sf))
+sps$SID <- seq_len(nrow(sps))
+
+survey_union <- sf::st_union(sf::st_make_valid(riofrio))
+
+site_buffers <- suppressWarnings(
+  sf::st_intersection(
+    sf::st_buffer(sps, 1000),
+    survey_union
+  )
+)
+
+site_buffers <- site_buffers %>%
+  dplyr::group_by(SID, Period) %>%
+  dplyr::summarise(geometry = sf::st_union(geometry), .groups = "drop")
+
+bv <- terra::vect(site_buffers)
+
+cell_area_ha <- prod(terra::res(oz)) / 10000
+opt_cells <- terra::extract(oz, bv, fun = function(x, ...) sum(!is.na(x)), ID = TRUE)
+opt_value_col <- setdiff(names(opt_cells), "ID")[1]
+opt_cells$SID <- site_buffers$SID[opt_cells$ID]
+
+buffer_area <- site_buffers %>%
+  dplyr::mutate(TB_ha = as.numeric(sf::st_area(.) / 10000)) %>%
+  sf::st_drop_geometry() %>%
+  dplyr::select(SID, TB_ha)
+
+buffer_optimal <- opt_cells %>%
+  dplyr::transmute(SID, OC = .data[[opt_value_col]]) %>%
+  dplyr::group_by(SID) %>%
+  dplyr::summarise(OC = sum(OC, na.rm = TRUE), .groups = "drop")
+
+soa <- sps %>%
+  sf::st_drop_geometry() %>%
+  dplyr::select(SID, Period) %>%
+  dplyr::left_join(buffer_area, by = "SID") %>%
+  dplyr::left_join(buffer_optimal, by = "SID") %>%
+  dplyr::mutate(
+    OC = dplyr::coalesce(OC, 0),
+    OA_ha = OC * cell_area_ha,
+    Pct = ifelse(!is.na(TB_ha) & TB_ha > 0, 100 * OA_ha / TB_ha, NA_real_)
+  )
+
+soa_valid <- soa %>%
+  dplyr::filter(is.finite(Pct), !is.na(Period)) %>%
+  dplyr::mutate(
+    PS = period_factor(period_short(Period))
+  )
+
+sps_coords <- sf::st_coordinates(sps)
+soa_valid$X <- sps_coords[match(soa_valid$SID, sps$SID), 1]
+soa_valid$Y <- sps_coords[match(soa_valid$SID, sps$SID), 2]
+
+soa_sf <- sf::st_as_sf(soa_valid, coords = c("X", "Y"), crs = sf::st_crs(dem), remove = FALSE)
+soa_sf$y <- 1
+
+tryCatch({
+  site_blocks <- make_spatial_blocks_square(soa_sf, predictors[[1]],
+    size = 2000, k = min(5, nrow(soa_sf)), column = "y")
+  soa_valid$spatial_block <- site_blocks$fold_ids
+}, error = function(e) {
+  set.seed(999)
+  soa_valid$spatial_block <<- sample(1:5, nrow(soa_valid), replace = TRUE)
+})
+
+block_bootstrap_medians <- function(df, nb = 10000, seed = 321) {
+  set.seed(seed)
+  bids <- unique(stats::na.omit(df$spatial_block))
+  pids <- sort(unique(as.character(df$PS)))
+  out <- matrix(NA_real_, nrow = nb, ncol = length(pids))
+  colnames(out) <- pids
+  for (b in seq_len(nb)) {
+    si <- sample(bids, length(bids), replace = TRUE)
+    sd <- dplyr::bind_rows(lapply(si, function(id) df[df$spatial_block == id, , drop = FALSE]))
+    m <- tapply(sd$Pct, as.character(sd$PS), stats::median, na.rm = TRUE)
+    out[b, names(m)] <- m
+  }
+  out
+}
+
+bm <- block_bootstrap_medians(soa_valid)
+bs <- data.frame(
+  PS = colnames(bm),
+  boot_median = apply(bm, 2, stats::median, na.rm = TRUE),
+  ci_low  = apply(bm, 2, stats::quantile, probs = 0.025, na.rm = TRUE),
+  ci_high = apply(bm, 2, stats::quantile, probs = 0.975, na.rm = TRUE)
+) %>%
+  dplyr::mutate(PS = factor(PS, levels = levels(soa_valid$PS)))
+```
+
+```{r fig10-tests, include=FALSE}
+fig10_test <- choose_group_test(soa_valid, "Pct", "PS", y_step = 0.09)
+```
+
+```{r fig10, fig.width=12, fig.height=6}
+boot_colors <- c(
+  "Neguanje\n(AD 100-700)" = "#2E86AB",
+  "Buritaca\n(AD 700-1000)" = "#F4A261",
+  "Tairona\n(AD 1000-1600)" = "#E63946"
+)
+
+p10a <- ggplot(fig10_test$data, aes(x = .group, y = .value, fill = .group)) +
+  geom_boxplot(
+    width = 0.5, color = "black", linewidth = 0.35,
+    outlier.shape = 16, outlier.size = 1, outlier.alpha = 0.6
+  ) +
+  ggpubr::stat_pvalue_manual(
+    fig10_test$pairwise,
+    label = "p_label",
+    tip.length = 0.012,
+    bracket.size = 0.4,
+    bracket.shorten = 0.03,
+    size = 3.5,
+    vjust = 0.2
+  ) +
+  scale_fill_manual(values = boot_colors) +
+  scale_y_continuous(expand = expansion(mult = c(0.04, 0.18))) +
+  labs(
+    title = "A) Optimal land access by period",
+    subtitle = make_omnibus_subtitle(fig10_test),
+    x = NULL, y = "Optimal land in 1 km catchment (%)"
+  ) +
+  theme(legend.position = "none")
+
+p10b <- ggplot(bs, aes(x = PS, y = boot_median, color = PS)) +
+  geom_hline(yintercept = median(soa_valid$Pct, na.rm = TRUE),
+    linetype = "dashed", color = "black", linewidth = 0.4) +
+  geom_pointrange(aes(ymin = ci_low, ymax = ci_high),
+    linewidth = 1, size = 1.2) +
+  geom_text(aes(label = paste0(round(boot_median, 1), "%")),
+    vjust = -1.5, size = 4, color = "black", fontface = "bold") +
+  geom_text(aes(label = paste0("[", round(ci_low, 1), " - ", round(ci_high, 1), "]")),
+    vjust = 2.5, size = 3, color = "black") +
+  scale_color_manual(values = boot_colors) +
+  scale_y_continuous(limits = c(
+    min(bs$ci_low) - 5,
+    max(bs$ci_high) + 8)) +
+  labs(
+    title = "B) Spatial bootstrap",
+    subtitle = "Medians with 95% CIs (10,000 iterations)",
+    x = NULL, y = "Median % optimal land"
+  ) +
+  theme(legend.position = "none")
+
+print(p10a + p10b)
+```
+
+```{r summ-fig10}
+cat("
+========== NUMERICAL SUMMARY: FIGURE 10 ==========
+")
+cat("Automatic assumption screening:
+")
+print(fig10_test$shapiro)
+cat("Levene p:", format.pval(fig10_test$levene_p, 3), "
+")
+cat("Selected framework:", fig10_test$method_label, "
+")
+cat("Omnibus test:", fig10_test$omnibus_label, "
+")
+cat("Omnibus p:", format.pval(fig10_test$omnibus_p, 3), "
+
+")
+cat("Pairwise comparisons (Holm-adjusted):
+")
+print(fig10_test$pairwise %>% dplyr::select(group1, group2, p, p.adj, p_label, y.position))
+cat("
+Spatially blocked bootstrap medians (10,000 iterations):
+")
+print(bs %>% dplyr::select(PS, boot_median, ci_low, ci_high) %>%
+  dplyr::mutate(dplyr::across(where(is.numeric), ~ round(.x, 2))))
+cat("=================================================
+")
+```
+
+# 18. Summary tables
+
+```{r table1, results='asis'}
+gam_st <- as.data.frame(summary(model_gam)$s.table)
+gam_st$Variable <- gsub("s\\((.*)\\)", "\\1", rownames(gam_st))
+
+table1 <- cs %>%
+  dplyr::transmute(
+    Variable = as.character(term),
+    VIF = round(vif_final[as.character(term)], 2),
+    GLM_beta = round(estimate, 3),
+    GLM_95CI = paste0("[", round(conf.low, 3), ", ", round(conf.high, 3), "]"),
+    GLM_p = format.pval(p.value, digits = 2),
+    GAM_edf = round(gam_st$edf[match(as.character(term), gam_st$Variable)], 2),
+    GAM_p = format.pval(gam_st$`p-value`[match(as.character(term), gam_st$Variable)], digits = 2)
+  )
+
+cat("\n========== TABLE 1: PREDICTOR DIAGNOSTICS ==========\n")
+cat("GLM training AUC:", round(glm_auc, 3),
+    "| GAM AUC:", round(auc_gam, 3),
+    "| RF AUC:", round(rf_train_auc, 3),
+    "| Spatial CV AUC (GLM):", round(auc_cv_mean, 3), "+-", round(auc_cv_sd, 3),
+    "| Spatial CV AUC (RF):", round(auc_cv_rf_mean, 3), "+-", round(auc_cv_rf_sd, 3), "\n\n")
+print(knitr::kable(table1, format = "simple", align = "lcccccc",
+  caption = "Table 1. Predictor diagnostics: VIF, GLM coefficients, and GAM smooth terms"))
+cat("\n=====================================================\n")
+```
+
+```{r table2, results='asis'}
+period_levels <- c("Neguanje (AD 100-700)", "Buritaca (AD 700-1000)", "Tairona (AD 1000-1600)")
+period_short_labels <- c("Neguanje", "Buritaca", "Tairona")
+
+site_n <- sites_sf %>%
+  sf::st_drop_geometry() %>%
+  dplyr::count(Period, name = "N_sites")
+
+terr_period <- terrazas %>%
+  sf::st_drop_geometry() %>%
+  dplyr::filter(!is.na(Diam_Terra), !is.na(Period)) %>%
+  dplyr::group_by(Period) %>%
+  dplyr::summarise(
+    N_terraces = dplyr::n(),
+    Diam_median = round(median(Diam_Terra, na.rm = TRUE), 1),
+    Diam_skew = round(sample_skewness(Diam_Terra), 2),
+    .groups = "drop"
+  )
+
+boot_tbl <- bs %>%
+  dplyr::mutate(
+    Period = dplyr::case_when(
+      grepl("Neguanje", PS) ~ "Neguanje (AD 100-700)",
+      grepl("Buritaca", PS) ~ "Buritaca (AD 700-1000)",
+      grepl("Tairona",  PS) ~ "Tairona (AD 1000-1600)"
+    ),
+    Boot_median = round(boot_median, 1),
+    Boot_CI = paste0("[", round(ci_low, 1), ", ", round(ci_high, 1), "]")
+  ) %>%
+  dplyr::select(Period, Boot_median, Boot_CI)
+
+table2 <- site_n %>%
+  dplyr::left_join(terr_period, by = "Period") %>%
+  dplyr::left_join(boot_tbl, by = "Period") %>%
+  dplyr::mutate(
+    Period = factor(Period, levels = period_levels, labels = period_short_labels)
+  ) %>%
+  dplyr::arrange(Period) %>%
+  dplyr::select(Period, N_sites, N_terraces, Diam_median, Diam_skew, Boot_median, Boot_CI)
+
+cat("\n========== TABLE 2: PERIOD-LEVEL SUMMARY ==========\n")
+cat("Temporal chi-sq:", round(chisq_temp$statistic, 2),
+    "| p:", format.pval(chisq_temp$p.value, 3), "\n\n")
+print(knitr::kable(table2, format = "simple", align = "lcccccc",
+  col.names = c("Period", "Sites", "Terraces", "Diam. med.", "Diam. skew",
+                "Boot. med. (%)", "Boot. 95% CI"),
+  caption = "Table 2. Period-level temporal stability and distributional shape"))
+cat("\n=====================================================\n")
+```
+
+# 19. Final numerical synthesis
+
+```{r final-summary}
+cat("=================================================
+")
+cat("FINAL SYNTHESIS - JAA_R_NOTEBOOK_TEST
+")
+cat("=================================================
+")
+cat("Model: GLM with DEM-derived channel distance
+")
+cat("Training AUC:", round(glm_auc, 3), "
+")
+cat("GAM AUC:", round(auc_gam, 3), "| GAM-GLM difference:", round(auc_gam - glm_auc, 3), "
+")
+cat("RF Training AUC:", round(rf_train_auc, 3), "| RF-GLM difference:", round(rf_train_auc - glm_auc, 3), "
+")
+cat("Spatial CV AUC (GLM):", round(auc_cv_mean, 3), "+-", round(auc_cv_sd, 3), "
+")
+cat("Spatial CV AUC (RF):", round(auc_cv_rf_mean, 3), "+-", round(auc_cv_rf_sd, 3), "
+")
+cat("RF gain over GLM (spatial CV):", round(auc_cv_rf_mean - auc_cv_mean, 3), "
+")
+cat("Max VIF:", round(max(vif_final), 3), "
+")
+cat("Moran's I (residuals):", round(moran_test$estimate[1], 4),
+    "| permutation p:", format.pval(moran_perm$p.value, 3), "
+")
+cat("Terraces vs landscape chi-square:", round(chisq_terr$statistic, 2),
+    "| p:", format.pval(chisq_terr$p.value, 3), "
+")
+cat("Temporal site distribution chi-square:", round(chisq_temp$statistic, 2),
+    "| p:", format.pval(chisq_temp$p.value, 3), "
+")
+cat("Figure 9 omnibus:", fig9_test$omnibus_label,
+    "| p:", format.pval(fig9_test$omnibus_p, 3), "
+")
+cat("Figure 10 omnibus:", fig10_test$omnibus_label,
+    "| p:", format.pval(fig10_test$omnibus_p, 3), "
+")
+cat("Bootstrap medians (10,000 spatially blocked iterations):
+")
+print(bs %>% dplyr::select(PS, boot_median, ci_low, ci_high) %>%
+  dplyr::mutate(dplyr::across(where(is.numeric), ~ round(.x, 2))))
+cat("Upper-tail terrace summary:
+")
+print(shape_summary %>% dplyr::select(zone, median, q90, q95, q99, max, skewness, pct_ge_global_q95))
+cat("
+RF permutation importance:
+")
+print(rf_imp)
+cat("=================================================
+")
+```
