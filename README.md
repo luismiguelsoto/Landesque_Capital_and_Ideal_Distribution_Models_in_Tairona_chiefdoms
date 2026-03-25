@@ -1,7 +1,7 @@
 Landesque Capital and Ideal Distribution Models: Mapping Agricultural Suitability in the Sierra Nevada de Santa Marta, Colombia (under review)
 --------------------------------------------------------------
 
-This repository contains code and data for the spatial and statistical analysis presented in the manuscript submitted to the Journal of Anthropological Archaeology. The study evaluates whether agricultural intensification in the Río Frío basin led to increasingly restricted access to favorable terrain or whether settlement remained closely aligned with environmental opportunity across the Neguanje (AD 100–700), Buritaca (AD 700–1000), and Tairona (AD 1000–1600) periods. The analysis integrates terrain derivatives with machine learning classifiers, spatial cross-validation, and temporal comparison to generate a continuous suitability surface for terraced agriculture and test expectations derived from Ideal Free and Ideal Despotic Distribution models.
+This repository contains code and data for the spatial and statistical analysis presented in the manuscript submitted to the Journal of Anthropological Archaeology. The study evaluates whether agricultural intensification in the Río Frío basin led to increasingly restricted access to favorable terrain or whether settlement remained closely aligned with environmental opportunity across the Neguanje (AD 100–700), Buritaca (AD 700–1000), and Tairona (AD 1000–1600) periods. The analysis integrates terrain derivatives with statistical, semi-parametric, and machine learning classifiers, spatial cross-validation, and temporal comparison to generate a continuous suitability surface for terraced agriculture and test expectations derived from Ideal Free and Ideal Despotic Distribution models.
 
 Repository Structure:
 ----------------------------------
@@ -16,54 +16,61 @@ Repository Structure:
      • TAIRONA_POLYGONS_SITES (shp)
      • RIO_FRIO_POLYGON_SURVEY (shp)
      • RIVERS_POLYGON_52KM (shp)
-     • DEM_POLYGON_52KM.tif (shp)
-     • PREDICTORS_STACK_V11.tif (shp)
+     • DEM_POLYGON_52KM.tif
+     • PREDICTORS_STACK_V11.tif
      • bg_points_V11.rds — Frozen background points for full reproducibility across sessions
 
 2. R Code Files:
-   - The main R script (or R Markdown file) contains the code to:
+   - JAA_R_NOTEBOOK.Rmd — Main analytical notebook (V13). Contains all code to reproduce the analysis from data download through final figures and tables.
+   - The notebook automatically downloads all required spatial data from this repository via the GitHub API, so no local path configuration is needed.
+
+   The script performs the following steps:
      a) Download all spatial datasets directly from this GitHub repository via the API.
      b) Derive five terrain covariates from the DEM (Elevation, Slope, TPI, TWI, Distance to DEM-derived channels).
-     c) Fit a binomial GLM and a GAM sensitivity analysis to model terrace occurrence probability.
-     d) Assess predictor collinearity through Variance Inflation Factors.
-     e) Evaluate residual spatial autocorrelation via Global Moran's I and empirical variograms.
-     f) Implement spatial block cross-validation with five square blocks of approximately 2 km.
-     g) Generate a continuous agricultural suitability surface classified into six quantile-based categories.
-     h) Compare settlement distributions across suitability classes for each archaeological period (chi-square test).
-     i) Analyze terrace diameter distributions across suitability zones (Kruskal-Wallis, ECDF, upper-tail percentiles).
-     j) Calculate catchment-level access to favorable land using spatially blocked bootstrap medians with 10,000 iterations.
-     k) Produce all figures (Figures 4–10) and summary tables (Tables 1–2) as reported in the manuscript.
+     c) Fit a binomial GLM to model terrace occurrence probability.
+     d) Assess predictor collinearity through Variance Inflation Factors (max VIF = 1.509).
+     e) Fit a GAM with penalized thin-plate regression splines (k = 5) as a sensitivity analysis for non-linearity (training AUC: GLM = 0.713, GAM = 0.746).
+     f) Fit a spatially blocked random forest (1,000 trees, ranger) as a further sensitivity analysis. The random forest achieves a higher training AUC (0.789) but lower spatially validated performance (0.665 ± 0.087) than the GLM (0.714 ± 0.045), confirming that the moderate AUC reflects genuine limits in environmental predictability rather than model specification constraints.
+     g) Evaluate residual spatial autocorrelation via Global Moran's I and empirical variograms.
+     h) Implement spatial block cross-validation with five square blocks of approximately 2 km.
+     i) Generate a continuous agricultural suitability surface classified into six quantile-based categories.
+     j) Compare settlement distributions across suitability classes for each archaeological period (chi-square test).
+     k) Analyze terrace diameter distributions across suitability zones (Kruskal-Wallis, ECDF, upper-tail percentiles).
+     l) Calculate catchment-level access to favorable land using spatially blocked bootstrap medians with 10,000 iterations.
+     m) Produce all figures (Figures 4–10) and summary tables (Tables 1–2) as reported in the manuscript.
+     n) Generate a model comparison table (GLM vs GAM vs Random Forest) with training and spatially validated AUC values.
 
 Software and Key Package Versions:
 ----------------------------------
-- R version: [R 4.5.2]
+- R version: 4.5.2
 - Key R packages used in this project include (with version numbers):
-     • blockCV: version 3.1-5
-     • boot: version 1.3-32
-     • broom: version 1.0.7
-     • car: version 3.1-5
-     • classInt: version 0.4-11
-     • dplyr: version 1.2.0
-     • forcats: version 1.0.0
-     • ggplot2: version 4.0.2
-     • ggpubr: version 0.6.0
-     • ggspatial: version 1.1.10
-     • gridExtra: version 2.3
-     • gstat: version 2.1-2
-     • httr: version 1.4.7
-     • jsonlite: version 1.9.1
-     • knitr: version 1.49
-     • mgcv: version 1.9-1
-     • patchwork: version 1.3.0
-     • pROC: version 1.18.5
-     • RColorBrewer: version 1.1-3
-     • rstatix: version 0.7.2
-     • scales: version 1.3.0
-     • sf: version 1.0-24
-     • spdep: version 1.4-2
-     • terra: version 1.8-42
-     • tidyr: version 1.3.2
-     • viridis: version 0.6.5
+     • blockCV: 3.1-5
+     • boot: 1.3-32
+     • broom: 1.0.7
+     • car: 3.1-5
+     • classInt: 0.4-11
+     • dplyr: 1.2.0
+     • forcats: 1.0.0
+     • ggplot2: 4.0.2
+     • ggpubr: 0.6.0
+     • ggspatial: 1.1.10
+     • gridExtra: 2.3
+     • gstat: 2.1-2
+     • httr: 1.4.7
+     • jsonlite: 1.9.1
+     • knitr: 1.49
+     • mgcv: 1.9-1
+     • patchwork: 1.3.0
+     • pROC: 1.18.5
+     • ranger: 0.17.0
+     • RColorBrewer: 1.1-3
+     • rstatix: 0.7.2
+     • scales: 1.3.0
+     • sf: 1.0-24
+     • spdep: 1.4-2
+     • terra: 1.8-42
+     • tidyr: 1.3.2
+     • viridis: 0.6.5
 
 Getting Started:
 ----------------------------------
