@@ -21,24 +21,11 @@ Repository Structure:
      • bg_points_V11.rds — Frozen background points for full reproducibility across sessions
 
 2. R Code Files:
-   - JAA_R_NOTEBOOK.Rmd — Main analytical notebook (V13). Contains all code to reproduce the analysis from data download through final figures and tables.
-   - The notebook automatically downloads all required spatial data from this repository via the GitHub API, so no local path configuration is needed.
-
-   The script performs the following steps:
-     a) Download all spatial datasets directly from this GitHub repository via the API.
-     b) Derive five terrain covariates from the DEM (Elevation, Slope, TPI, TWI, Distance to DEM-derived channels).
-     c) Fit a binomial GLM to model terrace occurrence probability.
-     d) Assess predictor collinearity through Variance Inflation Factors (max VIF = 1.509).
-     e) Fit a GAM with penalized thin-plate regression splines (k = 5) as a sensitivity analysis for non-linearity (training AUC: GLM = 0.713, GAM = 0.746).
-     f) Fit a spatially blocked random forest (1,000 trees, ranger) as a further sensitivity analysis. The random forest achieves a higher training AUC (0.789) but lower spatially validated performance (0.665 ± 0.087) than the GLM (0.714 ± 0.045), confirming that the moderate AUC reflects genuine limits in environmental predictability rather than model specification constraints.
-     g) Evaluate residual spatial autocorrelation via Global Moran's I and empirical variograms.
-     h) Implement spatial block cross-validation with five square blocks of approximately 2 km.
-     i) Generate a continuous agricultural suitability surface classified into six quantile-based categories.
-     j) Compare settlement distributions across suitability classes for each archaeological period (chi-square test).
-     k) Analyze terrace diameter distributions across suitability zones (Kruskal-Wallis, ECDF, upper-tail percentiles).
-     l) Calculate catchment-level access to favorable land using spatially blocked bootstrap medians with 10,000 iterations.
-     m) Produce all figures (Figures 4–10) and summary tables (Tables 1–2) as reported in the manuscript.
-     n) Generate a model comparison table (GLM vs GAM vs Random Forest) with training and spatially validated AUC values.
+   - The main R script (or R Markdown file) contains the code to:
+     a) Load required packages.
+     b) Download the datasets and GIS files directly from GitHub.
+     c) Process environmental variables and perform House-Lot spatial analysis.
+     d) Generate the figures or tables as presented in the manuscript.
 
 Software and Key Package Versions:
 ----------------------------------
