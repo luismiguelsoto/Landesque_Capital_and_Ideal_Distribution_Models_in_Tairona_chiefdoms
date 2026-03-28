@@ -62,9 +62,10 @@ Software and Key Package Versions:
 Getting Started:
 ----------------------------------
 1. Clone or download this repository.
-2. Open JAA_R_NOTEBOOK.Rmd in RStudio.
-3. Run the notebook from top to bottom. The script automatically downloads all required spatial data from this repository via the GitHub API, so no local path configuration is needed.
-4. All figures, tables, and numerical summaries reported in the manuscript are reproduced in sequence.
+2. Open the main R script (or R Markdown file) in RStudio.
+3. Ensure that you have an active Internet connection; the code downloads the GIS files directly from GitHub.
+4. Run the R script from top to bottom to reproduce the analysis and generate all figures and tables as presented in the manuscript.
+5. For any issues, consult the comments in the code or contact the corresponding author.
 
 Manuscript Summary:
 ----------------------------------
