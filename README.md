@@ -1,4 +1,4 @@
-Landesque Capital and Ideal Distribution Models: Mapping Agricultural Suitability in the Sierra Nevada de Santa Marta, Colombia (under review)
+Landesque Capital and Ideal Distribution Models: Mapping Agricultural Suitability in the Sierra Nevada de Santa Marta, Colombia
 --------------------------------------------------------------
 
 This repository contains code and data for the spatial and statistical analysis presented in the manuscript submitted to the Journal of Anthropological Archaeology. The study evaluates whether agricultural intensification in the Río Frío basin led to increasingly restricted access to favorable terrain or whether settlement remained closely aligned with environmental opportunity across the Neguanje (AD 100–700), Buritaca (AD 700–1000), and Tairona (AD 1000–1600) periods. The analysis integrates terrain derivatives with statistical, semi-parametric, and machine learning classifiers, spatial cross-validation, and temporal comparison to generate a continuous suitability surface for terraced agriculture and test expectations derived from Ideal Free and Ideal Despotic Distribution models.
